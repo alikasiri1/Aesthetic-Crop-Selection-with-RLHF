@@ -38,7 +38,7 @@ def parse_args():
     parser.add_argument("--num_episodes", type=int, default=5, help="Number of episodes to run")
     parser.add_argument("--downscale", type=int, nargs=2, default=[128, 128], help="Downscale resolution")
     parser.add_argument("--init_crop", type=int, nargs=2, default=[448, 448], help="Initial crop size")
-    parser.add_argument("--max_steps", type=int, default=200, help="Max steps per episode")
+    parser.add_argument("--max_steps", type=int, default=1000, help="Max steps per episode")
     return parser.parse_args()
 
 
