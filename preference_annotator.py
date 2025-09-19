@@ -12,7 +12,7 @@ import argparse
 import json
 import os
 import tkinter as tk
-from tkinter import tqdm
+# from tkinter import tqdm
 from typing import List, Dict, Any
 
 import cv2

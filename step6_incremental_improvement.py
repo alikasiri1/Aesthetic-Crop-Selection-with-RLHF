@@ -148,7 +148,7 @@ class IncrementalImprovementPipeline:
     Main pipeline for incremental improvement using RLHF-inspired approach
     """
     
-    def __init__(self, base_dir: str = "results/step6"):
+    def __init__(self, base_dir: str = "Aesthetic-Crop-Selection-with-RLHF/results/step6"):
         self.base_dir = base_dir
         os.makedirs(base_dir, exist_ok=True)
         
@@ -342,10 +342,11 @@ class IncrementalImprovementPipeline:
         
         # Create custom environment with combined reward
         class CombinedRewardEnv(FrameSelectorGymEnv):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.human_reward_model = kwargs.get('human_reward_model')
-                self.aesthetic_scorer = kwargs.get('aesthetic_scorer')
+            def __init__(self, image_path, scorer, downscale_hw, init_crop_hw, max_steps, 
+                         human_reward_model=None, aesthetic_scorer=None, **kwargs):
+                super().__init__(image_path, scorer, downscale_hw, init_crop_hw, max_steps, **kwargs)
+                self.human_reward_model = human_reward_model
+                self.aesthetic_scorer = aesthetic_scorer
                 
             def step(self, action):
                 obs, reward, terminated, truncated, info = self.core_env.step(int(action))
