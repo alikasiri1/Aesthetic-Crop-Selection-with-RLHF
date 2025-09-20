@@ -21,15 +21,40 @@ class AestheticScorer(nn.Module):
     for beauty assessment of image crops
     """
     
-    def __init__(self, backbone_name: str = 'efficientnet_b0', num_classes: int = 1):
+    def __init__(self, backbone_name: str = 'efficientnet_b0', num_classes: int = 1, gray_mode: bool = False):
         super(AestheticScorer, self).__init__()
+        
+        self.gray_mode = gray_mode
         
         # Use pre-trained backbone
         if backbone_name.startswith('efficientnet'):
+            # For grayscale, we need to modify the first layer to accept 1 channel instead of 3
             self.backbone = timm.create_model(backbone_name, pretrained=True, num_classes=0)
+            if gray_mode:
+                # Modify first conv layer to accept 1 channel input
+                original_conv = self.backbone.conv_stem
+                self.backbone.conv_stem = nn.Conv2d(1, original_conv.out_channels, 
+                                                   kernel_size=original_conv.kernel_size,
+                                                   stride=original_conv.stride,
+                                                   padding=original_conv.padding,
+                                                   bias=original_conv.bias is not None)
+                # Initialize with average of RGB weights
+                with torch.no_grad():
+                    self.backbone.conv_stem.weight.data = original_conv.weight.data.mean(dim=1, keepdim=True)
             feature_dim = self.backbone.num_features
         elif backbone_name.startswith('resnet'):
             self.backbone = models.__dict__[backbone_name](pretrained=True)
+            if gray_mode:
+                # Modify first conv layer to accept 1 channel input
+                original_conv = self.backbone.conv1
+                self.backbone.conv1 = nn.Conv2d(1, original_conv.out_channels, 
+                                               kernel_size=original_conv.kernel_size,
+                                               stride=original_conv.stride,
+                                               padding=original_conv.padding,
+                                               bias=original_conv.bias is not None)
+                # Initialize with average of RGB weights
+                with torch.no_grad():
+                    self.backbone.conv1.weight.data = original_conv.weight.data.mean(dim=1, keepdim=True)
             self.backbone = nn.Sequential(*list(self.backbone.children())[:-1])  # Remove final FC
             feature_dim = 2048 if '50' in backbone_name else 512
         else:
@@ -164,19 +189,30 @@ class AestheticScorerPipeline:
     
     def __init__(self, model_path: Optional[str] = None, 
                  backbone_name: str = 'efficientnet_b0',
-                 device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
+                 device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+                 gray_mode: bool = False):
         
         self.device = device
-        self.model = AestheticScorer(backbone_name=backbone_name).to(device)
+        self.gray_mode = gray_mode
+        self.model = AestheticScorer(backbone_name=backbone_name, gray_mode=gray_mode).to(device)
         
         # Image preprocessing
-        self.transform = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                               std=[0.229, 0.224, 0.225])
-        ])
+        if gray_mode:
+            self.transform = transforms.Compose([
+                transforms.ToPILImage(),
+                transforms.Resize((224, 224)),
+                transforms.Grayscale(num_output_channels=1),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5], std=[0.5])  # Normalize grayscale
+            ])
+        else:
+            self.transform = transforms.Compose([
+                transforms.ToPILImage(),
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                   std=[0.229, 0.224, 0.225])
+            ])
         
         # Load model if path provided
         if model_path and os.path.exists(model_path):
@@ -215,9 +251,21 @@ class AestheticScorerPipeline:
         self.model.eval()
         with torch.no_grad():
             # Preprocess image
-            if len(image.shape) == 3 and image.shape[2] == 3:
-                # BGR to RGB
-                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            if self.gray_mode:
+                # For grayscale mode, ensure we have a single channel image
+                if len(image.shape) == 3 and image.shape[2] == 3:
+                    # Convert BGR to grayscale
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                elif len(image.shape) == 2:
+                    # Already grayscale
+                    pass
+                else:
+                    raise ValueError(f"Unexpected image shape for grayscale mode: {image.shape}")
+            else:
+                # RGB mode
+                if len(image.shape) == 3 and image.shape[2] == 3:
+                    # BGR to RGB
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             
             tensor = self.transform(image).unsqueeze(0).to(self.device)
             

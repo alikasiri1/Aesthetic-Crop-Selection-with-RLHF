@@ -30,23 +30,34 @@ class FrameSelectorEnv:
         scorer: Optional[AestheticScorerPipeline] = None,
         downscale_hw: Tuple[int, int] = (128, 128),
         init_crop_hw: Tuple[int, int] = (224, 224),
-        step_pixels: int = 64, # 32 is better for smaller models
+        step_pixels: int = 32, # 32 is better for smaller models
         size_step_pixels: int = 32,
         max_steps: int = 50,
         proposals: Optional[List[Tuple[int, int, int, int]]] = None,
         backbone: str = "efficientnet_b0",
         seed: int = 0,
         allow_resize: bool = False,
+        gray_mode: bool = False,
     ) -> None:
         assert os.path.exists(image_path), f"Image not found: {image_path}"
         self.rng = np.random.RandomState(seed)
+        self.gray_mode = gray_mode
 
         self.image_bgr = cv2.imread(image_path)
         if self.image_bgr is None:
             raise FileNotFoundError(f"Could not read image: {image_path}")
+        
+        # Convert to grayscale if gray_mode is enabled
+        if self.gray_mode:
+            self.image_bgr = cv2.cvtColor(self.image_bgr, cv2.COLOR_BGR2GRAY)
+            # Convert grayscale to 3-channel for compatibility with existing code
+            self.image_bgr = cv2.cvtColor(self.image_bgr, cv2.COLOR_GRAY2BGR)
+            print("Processing image in grayscale mode")
+        
         self.H, self.W = self.image_bgr.shape[:2]
-
-        self.scorer = scorer or AestheticScorerPipeline(backbone_name=backbone)
+        print(f"Image size: {self.H}x{self.W}")
+        
+        self.scorer = scorer or AestheticScorerPipeline(backbone_name=backbone, gray_mode=gray_mode)
         self.downscale_hw = downscale_hw
         self.init_crop_hw = init_crop_hw
         self.step_pixels = step_pixels
@@ -54,26 +65,36 @@ class FrameSelectorEnv:
         self.max_steps = max_steps
         self.step_count = 0
 
-        # Action space definition
-        # 0: up, 1: down, 2: left, 3: right,
-        # 4: wider, 5: narrower, 6: taller, 7: shorter,
-        # 8: jump_to_best_proposal, 9: select
-        self.num_actions = 10 if allow_resize else 6
+        # Action space definition - 8 actions for edge manipulation
+        # 0: move top edge down (crop smaller from top)
+        # 1: move top edge up (crop larger from top)
+        # 2: move left edge right (crop smaller from left)
+        # 3: move left edge left (crop larger from left)
+        # 4: move bottom edge up (crop smaller from bottom)
+        # 5: move bottom edge down (crop larger from bottom)
+        # 6: move right edge left (crop smaller from right)
+        # 7: move right edge right (crop larger from right)
+        self.num_actions = 8
         print(f"Number of actions: {self.num_actions}")
+        print(f"Max steps: {self.max_steps}")
 
-        # Initialize crop box (x, y, w, h)
-        self.crop_box = self._init_centered_crop()
+        # Initialize crop box (x_min, y_min, x_max, y_max) - starts as full image
+        self.crop_box = self._init_full_image_crop()
 
-        # Proposals (optional): list of (x, y, w, h)
+        # Proposals (optional): list of (x_min, y_min, x_max, y_max)
         self.proposals = proposals if proposals is not None else self._generate_proposals()
 
         # Cached downscaled image for observation
         self.obs_image = cv2.resize(self.image_bgr, (self.downscale_hw[1], self.downscale_hw[0]))
 
     # ------------------------ Core API ------------------------
-    def reset(self) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def reset(self, random_init: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
         self.step_count = 0
-        self.crop_box = self._init_centered_crop()
+        if random_init:
+            self.crop_box = self._init_random_crop()
+        else:
+            self.crop_box = self._init_full_image_crop()
+        
         obs = self._build_observation()
         return obs, {"crop_box": self.crop_box}
 
@@ -83,7 +104,7 @@ class FrameSelectorEnv:
         self._clamp_crop_box()
 
         reward = self._compute_reward()
-        done = action == 9  # select
+        done = False  # No explicit select action, episode ends on max_steps
         truncated = self.step_count >= self.max_steps
 
         obs = self._build_observation()
@@ -91,13 +112,20 @@ class FrameSelectorEnv:
         return obs, reward, done, truncated, info
 
     # ------------------------ Helpers ------------------------
-    def _init_centered_crop(self) -> Tuple[int, int, int, int]:
+    def _init_full_image_crop(self) -> Tuple[int, int, int, int]:
+        """Initialize crop as full image (x_min, y_min, x_max, y_max)"""
+        return (0, 0, self.W, self.H)
+
+    def _init_random_crop(self) -> Tuple[int, int, int, int]:
+        """Random initial crop (x_min, y_min, x_max, y_max)"""
         w, h = self.init_crop_hw[1], self.init_crop_hw[0]
         w = min(w, self.W)
         h = min(h, self.H)
-        x = (self.W - w) // 2
-        y = (self.H - h) // 2
-        return (x, y, w, h)
+        x_min = self.rng.randint(0, max(1, self.W - w))
+        y_min = self.rng.randint(0, max(1, self.H - h))
+        x_max = x_min + w
+        y_max = y_min + h
+        return (x_min, y_min, x_max, y_max)
 
     def _generate_proposals(self, k: int = 20) -> List[Tuple[int, int, int, int]]:
         # Use a simple grid of proposals
@@ -107,63 +135,66 @@ class FrameSelectorEnv:
         scored = []
         for crop, box in crops:
             s = self.scorer.score_image(crop)
-            scored.append((s, box))
+            # Convert (x, y, w, h) to (x_min, y_min, x_max, y_max)
+            x, y, w, h = box
+            converted_box = (x, y, x + w, y + h)
+            scored.append((s, converted_box))
         scored.sort(key=lambda t: t[0], reverse=True)
         return [box for _, box in scored[:k]]
 
     def _apply_action(self, action: int) -> None:
-        x, y, w, h = self.crop_box
+        x_min, y_min, x_max, y_max = self.crop_box
 
-        # Movement
-        if action == 0:  # up
-            y -= self.step_pixels
-        elif action == 1:  # down
-            y += self.step_pixels
-        elif action == 2:  # left
-            x -= self.step_pixels
-        elif action == 3:  # right
-            x += self.step_pixels
-
-        # jump to best proposal
-        elif action == 4:  # jump to best proposal
-            if self.proposals:
-                self.crop_box = self.proposals[0]
-                return
-
-        # select
-        elif action == 5:  # select
-            pass
-
-        # if allow_resize is True:
-        elif self.allow_resize:
-            if action == 6:  # wider
-                w += self.size_step_pixels
-            elif action == 7:  # narrower
-                w -= self.size_step_pixels
-            elif action == 8:  # taller
-                h += self.size_step_pixels
-            elif action == 9:  # shorter
-                h -= self.size_step_pixels
-            else:
-                raise ValueError(f"Invalid action: {action}")
+        # Edge manipulation actions
+        if action == 0:  # move top edge down (crop smaller from top)
+            y_min += self.step_pixels
+        elif action == 1:  # move top edge up (crop larger from top)
+            y_min -= self.step_pixels
+        elif action == 2:  # move left edge right (crop smaller from left)
+            x_min += self.step_pixels
+        elif action == 3:  # move left edge left (crop larger from left)
+            x_min -= self.step_pixels
+        elif action == 4:  # move bottom edge up (crop smaller from bottom)
+            y_max -= self.step_pixels
+        elif action == 5:  # move bottom edge down (crop larger from bottom)
+            y_max += self.step_pixels
+        elif action == 6:  # move right edge left (crop smaller from right)
+            x_max -= self.step_pixels
+        elif action == 7:  # move right edge right (crop larger from right)
+            x_max += self.step_pixels
         else:
-            # if allow_resize=False and action is greater than 5
-            if action > 5:
-                raise ValueError(f"Invalid action: {action}")
+            raise ValueError(f"Invalid action: {action}")
 
-        self.crop_box = (x, y, w, h)
+        self.crop_box = (x_min, y_min, x_max, y_max)
 
     def _clamp_crop_box(self) -> None:
-        x, y, w, h = self.crop_box
-        w = max(32, min(w, self.W))
-        h = max(32, min(h, self.H))
-        x = max(0, min(x, self.W - w))
-        y = max(0, min(y, self.H - h))
-        self.crop_box = (x, y, w, h)
+        x_min, y_min, x_max, y_max = self.crop_box
+        
+        # Ensure crop stays within image boundaries
+        x_min = max(0, min(x_min, self.W))
+        y_min = max(0, min(y_min, self.H))
+        x_max = max(0, min(x_max, self.W))
+        y_max = max(0, min(y_max, self.H))
+        
+        # Ensure crop doesn't invert (x_min < x_max, y_min < y_max)
+        # and has minimum size
+        min_size = 32
+        if x_max - x_min < min_size:
+            if x_min == 0:
+                x_max = min_size
+            else:
+                x_min = x_max - min_size
+        if y_max - y_min < min_size:
+            if y_min == 0:
+                y_max = min_size
+            else:
+                y_min = y_max - min_size
+                
+        self.crop_box = (x_min, y_min, x_max, y_max)
 
     def _compute_reward(self) -> float:
-        x, y, w, h = self.crop_box
-        crop = self.image_bgr[y : y + h, x : x + w]
+        x_min, y_min, x_max, y_max = self.crop_box
+        crop = self.image_bgr[y_min:y_max, x_min:x_max]
         score_1_to_10 = self.scorer.score_image(crop)
         # Normalize to [0, 1] and optionally add small step penalty to encourage quicker selection
         reward = (score_1_to_10 - 1.0) / 9.0
@@ -171,32 +202,34 @@ class FrameSelectorEnv:
         return float(reward)
 
     def _build_observation(self) -> np.ndarray:
-        # Downscaled RGB image in [0,1]
-        img = cv2.cvtColor(self.obs_image, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        Hs, Ws = img.shape[:2]
-        # Encode crop box as a mask channel
-        mask = np.zeros((Hs, Ws, 1), dtype=np.float32)
-        # Map crop box from original coords to downscaled grid
-        scale_y = Hs / self.H
-        scale_x = Ws / self.W
-        x, y, w, h = self.crop_box
-        xs, ys = int(x * scale_x), int(y * scale_y)
-        ws, hs = max(1, int(w * scale_x)), max(1, int(h * scale_y))
-        mask[ys : ys + hs, xs : xs + ws, 0] = 1.0
-        obs = np.concatenate([img, mask], axis=2)  # shape (H, W, 4)
+        # Get current crop and resize to observation size
+        x_min, y_min, x_max, y_max = self.crop_box
+        crop = self.image_bgr[y_min:y_max, x_min:x_max]
+        
+        # Resize crop to observation size
+        obs_crop = cv2.resize(crop, (self.downscale_hw[1], self.downscale_hw[0]))
+        
+        if self.gray_mode:
+            # Convert to grayscale and add channel dimension
+            obs = cv2.cvtColor(obs_crop, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+            obs = np.expand_dims(obs, axis=2)  # Add channel dimension (H, W, 1)
+        else:
+            # Convert to RGB and normalize
+            obs = cv2.cvtColor(obs_crop, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        
         return obs
 
     # Convenience helpers
     def render(self, overlay_box: bool = True, scale: float = 0.5) -> np.ndarray:
         vis = self.image_bgr.copy()
         if overlay_box:
-            x, y, w, h = self.crop_box
-            cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            x_min, y_min, x_max, y_max = self.crop_box
+            cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
         if scale != 1.0:
             vis = cv2.resize(vis, (int(self.W * scale), int(self.H * scale)))
         return vis
 
     def get_current_score(self) -> float:
-        x, y, w, h = self.crop_box
-        crop = self.image_bgr[y : y + h, x : x + w]
+        x_min, y_min, x_max, y_max = self.crop_box
+        crop = self.image_bgr[y_min:y_max, x_min:x_max]
         return float(self.scorer.score_image(crop))

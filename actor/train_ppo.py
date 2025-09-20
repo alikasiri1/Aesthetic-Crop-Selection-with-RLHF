@@ -2,11 +2,20 @@
 Step 4 – Train Actor with PPO using Stable-Baselines3
 
 Usage:
+  # RGB mode (default):
   python actor/train_ppo.py \
     --image Aesthetic-Crop-Selection-with-RLHF/image.jpg \
     --timesteps 20000 \
     --save_dir Aesthetic-Crop-Selection-with-RLHF/actor/checkpoints \
     --downscale 128 128 --init_crop 224 224
+
+  # Grayscale mode:
+  python actor/train_ppo.py \
+    --image Aesthetic-Crop-Selection-with-RLHF/image.jpg \
+    --timesteps 20000 \
+    --save_dir Aesthetic-Crop-Selection-with-RLHF/actor/checkpoints \
+    --downscale 128 128 --init_crop 224 224 \
+    --gray_mode
 """
 import os
 import argparse
@@ -24,14 +33,17 @@ from scorer.aesthetic_scorer import AestheticScorerPipeline
 
 class CustomCNN(BaseFeaturesExtractor):
     """
-    Custom CNN for 4-channel input (RGB + mask)
+    Custom CNN for both RGB (3-channel) and grayscale (1-channel) input
     """
-    def __init__(self, observation_space, features_dim: int = 256):
+    def __init__(self, observation_space, features_dim: int = 256, gray_mode: bool = False):
         super(CustomCNN, self).__init__(observation_space, features_dim)
         
-        # Input: (H, W, 4) -> (4, H, W)
+        self.gray_mode = gray_mode
+        input_channels = 1 if gray_mode else 3
+        
+        # Input: (H, W, C) -> (C, H, W)
         self.cnn = nn.Sequential(
-            nn.Conv2d(4, 32, kernel_size=8, stride=4, padding=0),
+            nn.Conv2d(input_channels, 32, kernel_size=8, stride=4, padding=0),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),
             nn.ReLU(),
@@ -42,7 +54,7 @@ class CustomCNN(BaseFeaturesExtractor):
         
         # Calculate the output size
         with torch.no_grad():
-            dummy_input = torch.zeros(1, 4, observation_space.shape[0], observation_space.shape[1])
+            dummy_input = torch.zeros(1, input_channels, observation_space.shape[0], observation_space.shape[1])
             dummy_output = self.cnn(dummy_input)
             n_flatten = dummy_output.shape[1]
         
@@ -52,7 +64,7 @@ class CustomCNN(BaseFeaturesExtractor):
         )
     
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        # Convert from (batch, H, W, 4) to (batch, 4, H, W)
+        # Convert from (batch, H, W, C) to (batch, C, H, W)
         observations = observations.permute(0, 3, 1, 2)
         return self.linear(self.cnn(observations))
 
@@ -67,10 +79,11 @@ def parse_args():
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--max_steps", type=int, default=1000)
+    p.add_argument("--gray_mode", action="store_true", help="Process images in grayscale instead of RGB")
     return p.parse_args()
 
 
-def make_env(image_path: str, downscale, init_crop, seed: int, max_steps: int):
+def make_env(image_path: str, downscale, init_crop, seed: int, max_steps: int, gray_mode: bool = False):
     def _thunk():
         scorer = AestheticScorerPipeline()
         env = FrameSelectorGymEnv(
@@ -80,6 +93,7 @@ def make_env(image_path: str, downscale, init_crop, seed: int, max_steps: int):
             init_crop_hw=(init_crop[0], init_crop[1]),
             max_steps=max_steps,
             seed=seed,
+            gray_mode=gray_mode,
         )
         return env
     return _thunk
@@ -89,7 +103,7 @@ def main():
     args = parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
 
-    env = DummyVecEnv([make_env(args.image, args.downscale, args.init_crop, args.seed, args.max_steps)])
+    env = DummyVecEnv([make_env(args.image, args.downscale, args.init_crop, args.seed, args.max_steps, args.gray_mode)])
 
     model = PPO(
         policy="CnnPolicy",
@@ -107,7 +121,7 @@ def main():
         verbose=1,
         policy_kwargs=dict(
             features_extractor_class=CustomCNN,
-            features_extractor_kwargs=dict(features_dim=256),
+            features_extractor_kwargs=dict(features_dim=256, gray_mode=args.gray_mode),
         ),
     )
 

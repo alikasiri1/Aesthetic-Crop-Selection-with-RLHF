@@ -21,8 +21,10 @@ class FrameSelectorGymEnv(gym.Env):
         init_crop_hw: Tuple[int, int] = (224, 224),
         max_steps: int = 50,
         seed: int = 0,
+        gray_mode: bool = False,
     ) -> None:
         super().__init__()
+        self.gray_mode = gray_mode
         self.core_env = FrameSelectorEnv(
             image_path=image_path,
             scorer=scorer,
@@ -30,18 +32,20 @@ class FrameSelectorGymEnv(gym.Env):
             init_crop_hw=init_crop_hw,
             max_steps=max_steps,
             seed=seed,
+            gray_mode=gray_mode,
         )
 
         H, W = downscale_hw
-        # Observation: (H, W, 4) float32 in [0,1]
-        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(H, W, 4), dtype=np.float32)
+        # Observation: (H, W, C) float32 in [0,1] - RGB or grayscale crop image
+        channels = 1 if gray_mode else 3
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(H, W, channels), dtype=np.float32)
         # Action: discrete choices from core env
         self.action_space = spaces.Discrete(self.core_env.num_actions)
 
-    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None, random_init: bool = False):
         if seed is not None:
             np.random.seed(seed)
-        obs, info = self.core_env.reset()
+        obs, info = self.core_env.reset(random_init=random_init)
         return obs.astype(np.float32), info
 
     def step(self, action: int):

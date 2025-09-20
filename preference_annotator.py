@@ -21,6 +21,24 @@ from PIL import Image, ImageTk
 
 from step6_incremental_improvement import PreferencePair, IncrementalImprovementPipeline
 
+def resize_keep_ratio(img, target=300):
+    h, w = img.shape[:2]
+
+    # اگر هر دو بعد از target بزرگتر باشند => کوچک کن
+    if w > target and h > target:
+        scale = target / max(w, h)  # کوچک کردن تا بزرگترین بعد بشود target
+    # اگر هر دو بعد از target کوچکتر باشند => بزرگ کن
+    elif w < target and h < target:
+        scale = target / max(w, h)  # بزرگ کردن تا بزرگترین بعد بشود target
+    else:
+        # اگر یکی بزرگتر یکی کوچکتر باشد، باز هم بر اساس بزرگترین بعد scale کن
+        scale = target / max(w, h)
+
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+
+    resized = cv2.resize(img, (new_w, new_h))
+    return resized
 
 class PreferenceAnnotator:
     def __init__(self, preferences_path: str):
@@ -150,14 +168,29 @@ class PreferenceAnnotator:
         
         crop_a = image[y_a:y_a+h_a, x_a:x_a+w_a]
         crop_b = image[y_b:y_b+h_b, x_b:x_b+w_b]
+        ##########################################################
+        crop_a = resize_keep_ratio(crop_a, target=300)
+        crop_b = resize_keep_ratio(crop_b, target=300)
+
+        # Convert BGR to RGB
+        crop_aa = cv2.cvtColor(crop_a, cv2.COLOR_BGR2GRAY)
+        crop_bb = cv2.cvtColor(crop_b, cv2.COLOR_BGR2GRAY)
         
+        # Convert to PIL and display
+        crop_a_pill = Image.fromarray(crop_aa)
+        crop_b_pill = Image.fromarray(crop_bb)
+        
+        crop_a_photoo = ImageTk.PhotoImage(crop_a_pill)
+        crop_b_photoo = ImageTk.PhotoImage(crop_b_pill)
+        #########################################################
         # Resize crops for display
         crop_a = cv2.resize(crop_a, (300, 300))
         crop_b = cv2.resize(crop_b, (300, 300))
         
+
         # Convert BGR to RGB
-        crop_a = cv2.cvtColor(crop_a, cv2.COLOR_BGR2RGB)
-        crop_b = cv2.cvtColor(crop_b, cv2.COLOR_BGR2RGB)
+        crop_a = cv2.cvtColor(crop_a, cv2.COLOR_BGR2GRAY)
+        crop_b = cv2.cvtColor(crop_b, cv2.COLOR_BGR2GRAY)
         
         # Convert to PIL and display
         crop_a_pil = Image.fromarray(crop_a)
@@ -166,11 +199,17 @@ class PreferenceAnnotator:
         crop_a_photo = ImageTk.PhotoImage(crop_a_pil)
         crop_b_photo = ImageTk.PhotoImage(crop_b_pil)
         
-        self.crop_a_image_label.config(image=crop_a_photo)
-        self.crop_a_image_label.image = crop_a_photo  # Keep a reference
+        self.crop_a_image_label.config(image=crop_a_photoo)
+        self.crop_a_image_label.image = crop_a_photoo  # Keep a reference
         
-        self.crop_b_image_label.config(image=crop_b_photo)
-        self.crop_b_image_label.image = crop_b_photo  # Keep a reference
+        self.crop_b_image_label.config(image=crop_b_photoo)
+        self.crop_b_image_label.image = crop_b_photoo  # Keep a reference
+
+        # self.crop_a_image_label.config(image=crop_a_photo)
+        # self.crop_a_image_label.image = crop_a_photo  # Keep a reference
+        
+        # self.crop_b_image_label.config(image=crop_b_photo)
+        # self.crop_b_image_label.image = crop_b_photo  # Keep a reference
         
         # Update navigation buttons
         self.prev_btn.config(state=tk.NORMAL if self.current_idx > 0 else tk.DISABLED)

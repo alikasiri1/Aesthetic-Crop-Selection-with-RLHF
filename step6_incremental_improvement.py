@@ -8,9 +8,15 @@ Stage 2 (Personalize): Collect human preferences and train reward model
 Stage 3 (Fine-tune): Combine NIMA + human reward for final policy
 
 Usage:
+  # RGB mode (default):
   python step6_incremental_improvement.py --stage 1 --image image.jpg
   python step6_incremental_improvement.py --stage 2 --preference_data preferences.json
   python step6_incremental_improvement.py --stage 3 --image image.jpg --human_reward_model human_reward.pth
+  
+  # Grayscale mode:
+  python step6_incremental_improvement.py --stage 1 --image image.jpg --gray_mode
+  python step6_incremental_improvement.py --stage 2 --preference_data preferences.json --gray_mode
+  python step6_incremental_improvement.py --stage 3 --image image.jpg --human_reward_model human_reward.pth --gray_mode
 """
 
 import argparse
@@ -48,13 +54,28 @@ class HumanRewardModel(nn.Module):
     Trained on preference pairs to learn human aesthetic taste
     """
     
-    def __init__(self, backbone_name: str = 'efficientnet_b0'):
+    def __init__(self, backbone_name: str = 'efficientnet_b0', gray_mode: bool = False):
         super(HumanRewardModel, self).__init__()
+        
+        self.gray_mode = gray_mode
         
         # Use same backbone as aesthetic scorer for consistency
         if backbone_name.startswith('efficientnet'):
             import timm
             self.backbone = timm.create_model(backbone_name, pretrained=True, num_classes=0)
+            
+            # Modify first conv layer for grayscale if needed
+            if gray_mode:
+                original_conv = self.backbone.conv_stem
+                self.backbone.conv_stem = nn.Conv2d(1, original_conv.out_channels, 
+                                                   kernel_size=original_conv.kernel_size,
+                                                   stride=original_conv.stride,
+                                                   padding=original_conv.padding,
+                                                   bias=original_conv.bias is not None)
+                # Initialize with average of RGB weights
+                with torch.no_grad():
+                    self.backbone.conv_stem.weight.data = original_conv.weight.data.mean(dim=1, keepdim=True)
+            
             feature_dim = self.backbone.num_features
         else:
             raise ValueError(f"Unsupported backbone: {backbone_name}")
@@ -96,9 +117,10 @@ class HumanRewardModel(nn.Module):
 class PreferenceDataset(Dataset):
     """Dataset for human preference pairs"""
     
-    def __init__(self, preferences: List[PreferencePair], transform=None):
+    def __init__(self, preferences: List[PreferencePair], transform=None, gray_mode: bool = False):
         self.preferences = preferences
         self.transform = transform
+        self.gray_mode = gray_mode
         
     def __len__(self):
         return len(self.preferences)
@@ -111,34 +133,53 @@ class PreferenceDataset(Dataset):
         if image is None:
             raise ValueError(f"Could not load image: {pref.image_path}")
         
-        # Extract crops
-        x_a, y_a, w_a, h_a = pref.crop_a
-        x_b, y_b, w_b, h_b = pref.crop_b
+        # Extract crops (now using x_min, y_min, x_max, y_max format)
+        x_min_a, y_min_a, x_max_a, y_max_a = pref.crop_a
+        x_min_b, y_min_b, x_max_b, y_max_b = pref.crop_b
         
-        crop_a = image[y_a:y_a+h_a, x_a:x_a+w_a]
-        crop_b = image[y_b:y_b+h_b, x_b:x_b+w_b]
+        crop_a = image[y_min_a:y_max_a, x_min_a:x_max_a]
+        crop_b = image[y_min_b:y_max_b, x_min_b:x_max_b]
         
         # Resize to standard size
         crop_a = cv2.resize(crop_a, (224, 224))
         crop_b = cv2.resize(crop_b, (224, 224))
         
-        # Convert BGR to RGB
-        crop_a = cv2.cvtColor(crop_a, cv2.COLOR_BGR2RGB)
-        crop_b = cv2.cvtColor(crop_b, cv2.COLOR_BGR2RGB)
-        
-        if self.transform:
-            crop_a = self.transform(crop_a)
-            crop_b = self.transform(crop_b)
-        
-        # Convert to tensor
-        crop_a = torch.from_numpy(crop_a).permute(2, 0, 1).float() / 255.0
-        crop_b = torch.from_numpy(crop_b).permute(2, 0, 1).float() / 255.0
-        
-        # Normalize
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-        crop_a = (crop_a - mean) / std
-        crop_b = (crop_b - mean) / std
+        if self.gray_mode:
+            # Convert BGR to grayscale
+            crop_a = cv2.cvtColor(crop_a, cv2.COLOR_BGR2GRAY)
+            crop_b = cv2.cvtColor(crop_b, cv2.COLOR_BGR2GRAY)
+            
+            if self.transform:
+                crop_a = self.transform(crop_a)
+                crop_b = self.transform(crop_b)
+            
+            # Convert to tensor
+            crop_a = torch.from_numpy(crop_a).unsqueeze(0).float() / 255.0  # Add channel dimension
+            crop_b = torch.from_numpy(crop_b).unsqueeze(0).float() / 255.0  # Add channel dimension
+            
+            # Normalize grayscale
+            mean = torch.tensor([0.5]).view(1, 1, 1)
+            std = torch.tensor([0.5]).view(1, 1, 1)
+            crop_a = (crop_a - mean) / std
+            crop_b = (crop_b - mean) / std
+        else:
+            # Convert BGR to RGB
+            crop_a = cv2.cvtColor(crop_a, cv2.COLOR_BGR2RGB)
+            crop_b = cv2.cvtColor(crop_b, cv2.COLOR_BGR2RGB)
+            
+            if self.transform:
+                crop_a = self.transform(crop_a)
+                crop_b = self.transform(crop_b)
+            
+            # Convert to tensor
+            crop_a = torch.from_numpy(crop_a).permute(2, 0, 1).float() / 255.0
+            crop_b = torch.from_numpy(crop_b).permute(2, 0, 1).float() / 255.0
+            
+            # Normalize RGB
+            mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+            crop_a = (crop_a - mean) / std
+            crop_b = (crop_b - mean) / std
         
         return crop_a, crop_b, torch.tensor(pref.preference, dtype=torch.float32)
 
@@ -148,12 +189,13 @@ class IncrementalImprovementPipeline:
     Main pipeline for incremental improvement using RLHF-inspired approach
     """
     
-    def __init__(self, base_dir: str = "Aesthetic-Crop-Selection-with-RLHF/results/step6"):
+    def __init__(self, base_dir: str = "Aesthetic-Crop-Selection-with-RLHF/results/step6", gray_mode: bool = False):
         self.base_dir = base_dir
+        self.gray_mode = gray_mode
         os.makedirs(base_dir, exist_ok=True)
         
         # Initialize components
-        self.aesthetic_scorer = AestheticScorerPipeline()
+        self.aesthetic_scorer = AestheticScorerPipeline(gray_mode=gray_mode)
         self.human_reward_model = None
         
     def stage1_bootstrap(self, image_path: str, timesteps: int = 20000, downscale: Tuple[int, int] = (128, 128), init_crop: Tuple[int, int] = (448, 448), max_steps: int = 1000):
@@ -169,14 +211,15 @@ class IncrementalImprovementPipeline:
             scorer=self.aesthetic_scorer,
             downscale_hw=downscale,
             init_crop_hw=init_crop,
-            max_steps=max_steps
+            max_steps=max_steps,
+            gray_mode=self.gray_mode
         )
         
         # Train PPO policy
         from stable_baselines3.common.vec_env import DummyVecEnv
         from actor.train_ppo import make_env, CustomCNN
         
-        vec_env = DummyVecEnv([make_env(image_path, downscale, init_crop, 0, max_steps)])
+        vec_env = DummyVecEnv([make_env(image_path, downscale, init_crop, 0, max_steps, self.gray_mode)])
         # vec_env = DummyVecEnv([env])
         
         model = PPO(
@@ -195,7 +238,7 @@ class IncrementalImprovementPipeline:
             verbose=1,
             policy_kwargs=dict(
                 features_extractor_class=CustomCNN,
-                features_extractor_kwargs=dict(features_dim=256),
+                features_extractor_kwargs=dict(features_dim=256, gray_mode=self.gray_mode),
             ),
         )
         
@@ -229,7 +272,8 @@ class IncrementalImprovementPipeline:
             scorer=self.aesthetic_scorer,
             downscale_hw=downscale,
             init_crop_hw=init_crop,
-            max_steps=max_steps
+            max_steps=max_steps,
+            gray_mode=self.gray_mode
         )
         
         # Generate diverse crop pairs
@@ -238,7 +282,7 @@ class IncrementalImprovementPipeline:
         
         for i in tqdm(range(num_pairs)):
             # Run episode to get crop
-            obs, info = env.reset()
+            obs, info = env.reset(random_init=True)
             for _ in range(random.randint(10, 50)):  # Random episode length
                 action, _ = model.predict(obs, deterministic=False)
                 obs, reward, terminated, truncated, info = env.step(action)
@@ -248,7 +292,7 @@ class IncrementalImprovementPipeline:
             crop_a = info['crop_box']
             
             # Generate second crop (random or from different episode)
-            obs, info = env.reset()
+            obs, info = env.reset(random_init=True)
             for _ in range(random.randint(10, 50)):
                 action, _ = model.predict(obs, deterministic=False)
                 obs, reward, terminated, truncated, info = env.step(action)
@@ -292,11 +336,11 @@ class IncrementalImprovementPipeline:
             print("Warning: Very few annotated preferences. Consider collecting more data.")
         
         # Create dataset and dataloader
-        dataset = PreferenceDataset(annotated_preferences)
+        dataset = PreferenceDataset(annotated_preferences, gray_mode=self.gray_mode)
         dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
         
         # Initialize human reward model
-        self.human_reward_model = HumanRewardModel(backbone_name='efficientnet_b0')
+        self.human_reward_model = HumanRewardModel(backbone_name='efficientnet_b0', gray_mode=self.gray_mode)
         
         # Training setup
         criterion = nn.BCEWithLogitsLoss()
@@ -311,7 +355,17 @@ class IncrementalImprovementPipeline:
                 
                 # Forward pass
                 logits = self.human_reward_model(crop_a, crop_b)
-                loss = criterion(logits.squeeze(), preference)
+                # Ensure both tensors have the same shape for BCE loss
+                if logits.shape != preference.shape:
+                    if logits.dim() > preference.dim():
+                        logits = logits.squeeze()
+                    elif preference.dim() > logits.dim():
+                        preference = preference.squeeze()
+                    # If still different shapes, reshape to match
+                    if logits.shape != preference.shape:
+                        logits = logits.view(-1)
+                        preference = preference.view(-1)
+                loss = criterion(logits, preference)
                 
                 # Backward pass
                 loss.backward()
@@ -320,8 +374,8 @@ class IncrementalImprovementPipeline:
                 total_loss += loss.item()
             
             avg_loss = total_loss / len(dataloader)
-            if epoch % 10 == 0:
-                print(f"Epoch {epoch}, Loss: {avg_loss:.4f}")
+            # if epoch % 10 == 0:
+            print(f"Epoch {epoch}, Loss: {avg_loss:.4f}")
         
         # Save human reward model
         reward_model_path = os.path.join(self.base_dir, "human_reward_model.pth")
@@ -337,18 +391,19 @@ class IncrementalImprovementPipeline:
         print("=== Stage 3: Fine-tune with Combined Reward ===")
         
         # Load human reward model
-        self.human_reward_model = HumanRewardModel(backbone_name='efficientnet_b0')
+        self.human_reward_model = HumanRewardModel(backbone_name='efficientnet_b0', gray_mode=self.gray_mode)
         self.human_reward_model.load_state_dict(torch.load(human_reward_model_path))
         self.human_reward_model.eval()
         
         # Create custom environment with combined reward
         class CombinedRewardEnv(FrameSelectorGymEnv):
             def __init__(self, image_path, scorer, downscale_hw, init_crop_hw, max_steps, 
-                         human_reward_model=None, aesthetic_scorer=None, **kwargs):
-                super().__init__(image_path, scorer, downscale_hw, init_crop_hw, max_steps, **kwargs)
+                         human_reward_model=None, aesthetic_scorer=None, gray_mode=False, **kwargs):
+                super().__init__(image_path, scorer, downscale_hw, init_crop_hw, max_steps, gray_mode=gray_mode, **kwargs)
                 self.human_reward_model = human_reward_model
                 self.aesthetic_scorer = aesthetic_scorer
-                
+                self.init_crop_hw = init_crop_hw
+                self.gray_mode = gray_mode
             def step(self, action):
                 obs, reward, terminated, truncated, info = self.core_env.step(int(action))
                 
@@ -357,16 +412,29 @@ class IncrementalImprovementPipeline:
                 
                 # Get human preference score (if available)
                 if self.human_reward_model is not None:
-                    x, y, w, h = info['crop_box']
-                    crop = self.core_env.image_bgr[y:y+h, x:x+w]
+                    x_min, y_min, x_max, y_max = info['crop_box']
+                    crop = self.core_env.image_bgr[y_min:y_max, x_min:x_max]
                     crop = cv2.resize(crop, (224, 224))
-                    crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                    crop_tensor = torch.from_numpy(crop).permute(2, 0, 1).float() / 255.0
                     
-                    # Normalize
-                    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-                    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-                    crop_tensor = (crop_tensor - mean) / std
+                    if self.gray_mode:
+                        # Convert BGR to grayscale
+                        crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                        crop_tensor = torch.from_numpy(crop).unsqueeze(0).float() / 255.0  # Add channel dimension
+                        
+                        # Normalize grayscale
+                        mean = torch.tensor([0.5]).view(1, 1, 1)
+                        std = torch.tensor([0.5]).view(1, 1, 1)
+                        crop_tensor = (crop_tensor - mean) / std
+                    else:
+                        # Convert BGR to RGB
+                        crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                        crop_tensor = torch.from_numpy(crop).permute(2, 0, 1).float() / 255.0
+                        
+                        # Normalize RGB
+                        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+                        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+                        crop_tensor = (crop_tensor - mean) / std
+                    
                     crop_tensor = crop_tensor.unsqueeze(0)
                     
                     # Get human preference score (compare with average crop)
@@ -378,7 +446,7 @@ class IncrementalImprovementPipeline:
                     human_score = 0.5
                 
                 # Combine rewards (weighted average)
-                combined_reward = 0.7 * (aesthetic_score - 1) / 9 + 0.3 * human_score
+                combined_reward = 0.1 * (aesthetic_score - 1) / 9 + 0.9 * human_score
                 combined_reward -= 0.005  # Small step penalty
                 
                 return obs.astype(np.float32), float(combined_reward), bool(terminated), bool(truncated), info
@@ -391,7 +459,8 @@ class IncrementalImprovementPipeline:
             init_crop_hw=init_crop,
             max_steps=max_steps,
             human_reward_model=self.human_reward_model,
-            aesthetic_scorer=self.aesthetic_scorer
+            aesthetic_scorer=self.aesthetic_scorer,
+            gray_mode=self.gray_mode
         )
         
         # Load bootstrap policy as starting point
@@ -460,9 +529,10 @@ def main():
     parser.add_argument("--downscale", type=int, nargs=2, default=[128, 128], help="Downscale dimensions")
     parser.add_argument("--init_crop", type=int, nargs=2, default=[448, 448], help="Initial crop dimensions")
     parser.add_argument("--max_steps", type=int, default=1000, help="Maximum steps per episode")
+    parser.add_argument("--gray_mode", action="store_true", help="Process images in grayscale instead of RGB")
     args = parser.parse_args()
     
-    pipeline = IncrementalImprovementPipeline()
+    pipeline = IncrementalImprovementPipeline(gray_mode=args.gray_mode)
     
     if args.stage == 1:
         if not args.image:
