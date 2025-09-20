@@ -30,12 +30,13 @@ class FrameSelectorEnv:
         scorer: Optional[AestheticScorerPipeline] = None,
         downscale_hw: Tuple[int, int] = (128, 128),
         init_crop_hw: Tuple[int, int] = (224, 224),
-        step_pixels: int = 32,
+        step_pixels: int = 64, # 32 is better for smaller models
         size_step_pixels: int = 32,
         max_steps: int = 50,
         proposals: Optional[List[Tuple[int, int, int, int]]] = None,
         backbone: str = "efficientnet_b0",
         seed: int = 0,
+        allow_resize: bool = False,
     ) -> None:
         assert os.path.exists(image_path), f"Image not found: {image_path}"
         self.rng = np.random.RandomState(seed)
@@ -57,7 +58,8 @@ class FrameSelectorEnv:
         # 0: up, 1: down, 2: left, 3: right,
         # 4: wider, 5: narrower, 6: taller, 7: shorter,
         # 8: jump_to_best_proposal, 9: select
-        self.num_actions = 10
+        self.num_actions = 10 if allow_resize else 6
+        print(f"Number of actions: {self.num_actions}")
 
         # Initialize crop box (x, y, w, h)
         self.crop_box = self._init_centered_crop()
@@ -111,6 +113,8 @@ class FrameSelectorEnv:
 
     def _apply_action(self, action: int) -> None:
         x, y, w, h = self.crop_box
+
+        # Movement
         if action == 0:  # up
             y -= self.step_pixels
         elif action == 1:  # down
@@ -119,22 +123,34 @@ class FrameSelectorEnv:
             x -= self.step_pixels
         elif action == 3:  # right
             x += self.step_pixels
-        elif action == 4:  # wider
-            w += self.size_step_pixels
-        elif action == 5:  # narrower
-            w -= self.size_step_pixels
-        elif action == 6:  # taller
-            h += self.size_step_pixels
-        elif action == 7:  # shorter
-            h -= self.size_step_pixels
-        elif action == 8:  # jump to best proposal
+
+        # jump to best proposal
+        elif action == 4:  # jump to best proposal
             if self.proposals:
                 self.crop_box = self.proposals[0]
                 return
-        elif action == 9:  # select
+
+        # select
+        elif action == 5:  # select
             pass
+
+        # if allow_resize is True:
+        elif self.allow_resize:
+            if action == 6:  # wider
+                w += self.size_step_pixels
+            elif action == 7:  # narrower
+                w -= self.size_step_pixels
+            elif action == 8:  # taller
+                h += self.size_step_pixels
+            elif action == 9:  # shorter
+                h -= self.size_step_pixels
+            else:
+                raise ValueError(f"Invalid action: {action}")
         else:
-            raise ValueError(f"Invalid action: {action}")
+            # if allow_resize=False and action is greater than 5
+            if action > 5:
+                raise ValueError(f"Invalid action: {action}")
+
         self.crop_box = (x, y, w, h)
 
     def _clamp_crop_box(self) -> None:

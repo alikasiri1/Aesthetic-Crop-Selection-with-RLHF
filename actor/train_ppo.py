@@ -19,7 +19,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 from .gym_wrapper import FrameSelectorGymEnv
-from ..scorer.aesthetic_scorer import AestheticScorerPipeline
+from scorer.aesthetic_scorer import AestheticScorerPipeline
 
 
 class CustomCNN(BaseFeaturesExtractor):
@@ -66,10 +66,11 @@ def parse_args():
     p.add_argument("--init_crop", type=int, nargs=2, default=[224, 224])
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--max_steps", type=int, default=1000)
     return p.parse_args()
 
 
-def make_env(image_path: str, downscale, init_crop, seed: int):
+def make_env(image_path: str, downscale, init_crop, seed: int, max_steps: int):
     def _thunk():
         scorer = AestheticScorerPipeline()
         env = FrameSelectorGymEnv(
@@ -77,7 +78,7 @@ def make_env(image_path: str, downscale, init_crop, seed: int):
             scorer=scorer,
             downscale_hw=(downscale[0], downscale[1]),
             init_crop_hw=(init_crop[0], init_crop[1]),
-            max_steps=50,
+            max_steps=max_steps,
             seed=seed,
         )
         return env
@@ -88,7 +89,7 @@ def main():
     args = parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
 
-    env = DummyVecEnv([make_env(args.image, args.downscale, args.init_crop, args.seed)])
+    env = DummyVecEnv([make_env(args.image, args.downscale, args.init_crop, args.seed, args.max_steps)])
 
     model = PPO(
         policy="CnnPolicy",
@@ -101,7 +102,7 @@ def main():
         gae_lambda=0.95,
         clip_range=0.2,
         vf_coef=0.5,
-        ent_coef=0.01,
+        ent_coef=0.05, # .01 is better for smaller models
         seed=args.seed,
         verbose=1,
         policy_kwargs=dict(

@@ -156,7 +156,7 @@ class IncrementalImprovementPipeline:
         self.aesthetic_scorer = AestheticScorerPipeline()
         self.human_reward_model = None
         
-    def stage1_bootstrap(self, image_path: str, timesteps: int = 20000):
+    def stage1_bootstrap(self, image_path: str, timesteps: int = 20000, downscale: Tuple[int, int] = (128, 128), init_crop: Tuple[int, int] = (448, 448), max_steps: int = 1000):
         """
         Stage 1: Bootstrap with pre-trained aesthetic scorer
         Train initial policy using NIMA-style aesthetic scoring
@@ -167,16 +167,17 @@ class IncrementalImprovementPipeline:
         env = FrameSelectorGymEnv(
             image_path=image_path,
             scorer=self.aesthetic_scorer,
-            downscale_hw=(128, 128),
-            init_crop_hw=(448, 448),
-            max_steps=1000
+            downscale_hw=downscale,
+            init_crop_hw=init_crop,
+            max_steps=max_steps
         )
         
         # Train PPO policy
         from stable_baselines3.common.vec_env import DummyVecEnv
         from actor.train_ppo import make_env, CustomCNN
         
-        vec_env = DummyVecEnv([make_env(image_path, (128, 128), (448, 448), 0)])
+        vec_env = DummyVecEnv([make_env(image_path, downscale, init_crop, 0, max_steps)])
+        # vec_env = DummyVecEnv([env])
         
         model = PPO(
             policy="CnnPolicy",
@@ -208,7 +209,7 @@ class IncrementalImprovementPipeline:
         
         return model, bootstrap_path
     
-    def stage2_collect_preferences(self, image_path: str, num_pairs: int = 100):
+    def stage2_collect_preferences(self, image_path: str, num_pairs: int = 100, downscale: Tuple[int, int] = (128, 128), init_crop: Tuple[int, int] = (448, 448), max_steps: int = 1000):
         """
         Stage 2: Collect human preferences
         Generate crop pairs and save for human annotation
@@ -226,9 +227,9 @@ class IncrementalImprovementPipeline:
         env = FrameSelectorGymEnv(
             image_path=image_path,
             scorer=self.aesthetic_scorer,
-            downscale_hw=(128, 128),
-            init_crop_hw=(448, 448),
-            max_steps=1000
+            downscale_hw=downscale,
+            init_crop_hw=init_crop,
+            max_steps=max_steps
         )
         
         # Generate diverse crop pairs
@@ -274,7 +275,7 @@ class IncrementalImprovementPipeline:
         
         return preferences_path
     
-    def stage2_train_reward_model(self, preferences_path: str, epochs: int = 50):
+    def stage2_train_reward_model(self, preferences_path: str, epochs: int = 50, downscale: Tuple[int, int] = (128, 128), init_crop: Tuple[int, int] = (448, 448), max_steps: int = 1000):
         """
         Stage 2: Train human reward model on annotated preferences
         """
@@ -295,7 +296,7 @@ class IncrementalImprovementPipeline:
         dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
         
         # Initialize human reward model
-        self.human_reward_model = HumanRewardModel()
+        self.human_reward_model = HumanRewardModel(backbone_name='efficientnet_b0')
         
         # Training setup
         criterion = nn.BCEWithLogitsLoss()
@@ -329,14 +330,14 @@ class IncrementalImprovementPipeline:
         
         return reward_model_path
     
-    def stage3_fine_tune(self, image_path: str, human_reward_model_path: str, timesteps: int = 10000):
+    def stage3_fine_tune(self, image_path: str, human_reward_model_path: str, timesteps: int = 10000, downscale: Tuple[int, int] = (128, 128), init_crop: Tuple[int, int] = (448, 448), max_steps: int = 1000):
         """
         Stage 3: Fine-tune policy with combined NIMA + human reward
         """
         print("=== Stage 3: Fine-tune with Combined Reward ===")
         
         # Load human reward model
-        self.human_reward_model = HumanRewardModel()
+        self.human_reward_model = HumanRewardModel(backbone_name='efficientnet_b0')
         self.human_reward_model.load_state_dict(torch.load(human_reward_model_path))
         self.human_reward_model.eval()
         
@@ -386,9 +387,9 @@ class IncrementalImprovementPipeline:
         env = CombinedRewardEnv(
             image_path=image_path,
             scorer=self.aesthetic_scorer,
-            downscale_hw=(128, 128),
-            init_crop_hw=(448, 448),
-            max_steps=1000,
+            downscale_hw=downscale,
+            init_crop_hw=init_crop,
+            max_steps=max_steps,
             human_reward_model=self.human_reward_model,
             aesthetic_scorer=self.aesthetic_scorer
         )
@@ -456,7 +457,9 @@ def main():
     parser.add_argument("--human_reward_model", type=str, help="Path to human reward model")
     parser.add_argument("--num_pairs", type=int, default=100, help="Number of preference pairs to generate")
     parser.add_argument("--epochs", type=int, default=50, help="Epochs for reward model training")
-    
+    parser.add_argument("--downscale", type=int, nargs=2, default=[128, 128], help="Downscale dimensions")
+    parser.add_argument("--init_crop", type=int, nargs=2, default=[448, 448], help="Initial crop dimensions")
+    parser.add_argument("--max_steps", type=int, default=1000, help="Maximum steps per episode")
     args = parser.parse_args()
     
     pipeline = IncrementalImprovementPipeline()
@@ -464,22 +467,22 @@ def main():
     if args.stage == 1:
         if not args.image:
             raise ValueError("--image required for stage 1")
-        pipeline.stage1_bootstrap(args.image, args.timesteps)
+        pipeline.stage1_bootstrap(args.image, args.timesteps, args.downscale, args.init_crop, args.max_steps)
         
     elif args.stage == 2:
         if not args.preference_data:
             # Generate preference pairs
             if not args.image:
                 raise ValueError("--image required for generating preference pairs")
-            pipeline.stage2_collect_preferences(args.image, args.num_pairs)
+            pipeline.stage2_collect_preferences(args.image, args.num_pairs, args.downscale, args.init_crop, args.max_steps)
         else:
             # Train reward model
-            pipeline.stage2_train_reward_model(args.preference_data, args.epochs)
+            pipeline.stage2_train_reward_model(args.preference_data, args.epochs, args.downscale, args.init_crop, args.max_steps)
             
     elif args.stage == 3:
         if not args.image or not args.human_reward_model:
             raise ValueError("--image and --human_reward_model required for stage 3")
-        pipeline.stage3_fine_tune(args.image, args.human_reward_model, args.timesteps)
+        pipeline.stage3_fine_tune(args.image, args.human_reward_model, args.timesteps, args.downscale, args.init_crop, args.max_steps)
 
 
 if __name__ == "__main__":
