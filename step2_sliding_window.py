@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 
 from scorer.aesthetic_scorer import AestheticScorerPipeline, ImageCropper
+from scorer.policy_scorer import PolicyScorerPipeline
 from utils.image_utils import visualize_crops, save_image
 
 
@@ -46,6 +47,18 @@ def save_topk_metadata(top_crops: List[Tuple[float, Tuple[int, int, int, int], n
         for i, (score, (x, y, w, h), _) in enumerate(top_crops, start=1):
             writer.writerow([i, f"{score:.4f}", x, y, w, h, f"crop_{i}_score_{score:.2f}.jpg"])
 
+from stable_baselines3 import PPO
+
+class RLScorer:
+    def __init__(self, policy_path):
+        self.policy = PPO.load(policy_path)
+    def score_image(self, crop):
+        obs = self._preprocess_crop(crop)
+        action, _ = self.policy.predict(obs, deterministic=True)
+        # or use self.policy.value_net(obs) as reward proxy
+        return float(action)  # or float(value)
+
+
 
 def main() -> None:
     args = parse_args()
@@ -58,7 +71,8 @@ def main() -> None:
     if image is None:
         raise FileNotFoundError(f"Could not read image: {args.image}")
 
-    scorer = AestheticScorerPipeline(backbone_name=args.backbone)
+    # scorer = AestheticScorerPipeline(backbone_name=args.backbone)
+    scorer = PolicyScorerPipeline("Aesthetic-Crop-Selection-with-RLHF/results/step6/final_policy.zip", gray_mode=True) 
     cropper = ImageCropper(crop_size=(args.crop_size[0], args.crop_size[1]), stride=args.stride)
 
     if args.multi_scale and len(args.multi_scale) > 0:

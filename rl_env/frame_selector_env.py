@@ -65,16 +65,17 @@ class FrameSelectorEnv:
         self.max_steps = max_steps
         self.step_count = 0
 
-        # Action space definition - 8 actions for edge manipulation
-        # 0: move top edge down (crop smaller from top)
-        # 1: move top edge up (crop larger from top)
-        # 2: move left edge right (crop smaller from left)
-        # 3: move left edge left (crop larger from left)
-        # 4: move bottom edge up (crop smaller from bottom)
-        # 5: move bottom edge down (crop larger from bottom)
-        # 6: move right edge left (crop smaller from right)
-        # 7: move right edge right (crop larger from right)
-        self.num_actions = 8
+        # Action space definition - 8 edge controls + 1 finish action
+        # 0: Decrease bottom width   -> move bottom edge up (reduce height)
+        # 1: Increase bottom width   -> move bottom edge down (increase height)
+        # 2: Decrease top width      -> move top edge down (reduce height)
+        # 3: Increase top width      -> move top edge up (increase height)
+        # 4: Decrease left height    -> move left edge right (reduce width)
+        # 5: Increase left height    -> move left edge left (increase width)
+        # 6: Decrease right height   -> move right edge left (reduce width)
+        # 7: Increase right height   -> move right edge right (increase width)
+        # 8: Finish/Save             -> end episode (agent decides to stop)
+        self.num_actions = 9
         print(f"Number of actions: {self.num_actions}")
         print(f"Max steps: {self.max_steps}")
 
@@ -100,11 +101,21 @@ class FrameSelectorEnv:
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         self.step_count += 1
+        # Handle finish/save action
+        if action == 8:
+            # Do not change crop box; compute final reward and terminate
+            reward = self._compute_reward()
+            done = True
+            truncated = False
+            obs = self._build_observation()
+            info = {"crop_box": self.crop_box, "step": self.step_count, "finished": True}
+            return obs, reward, done, truncated, info
+
         self._apply_action(action)
         self._clamp_crop_box()
 
         reward = self._compute_reward()
-        done = False  # No explicit select action, episode ends on max_steps
+        done = False
         truncated = self.step_count >= self.max_steps
 
         obs = self._build_observation()
@@ -145,22 +156,22 @@ class FrameSelectorEnv:
     def _apply_action(self, action: int) -> None:
         x_min, y_min, x_max, y_max = self.crop_box
 
-        # Edge manipulation actions
-        if action == 0:  # move top edge down (crop smaller from top)
-            y_min += self.step_pixels
-        elif action == 1:  # move top edge up (crop larger from top)
-            y_min -= self.step_pixels
-        elif action == 2:  # move left edge right (crop smaller from left)
-            x_min += self.step_pixels
-        elif action == 3:  # move left edge left (crop larger from left)
-            x_min -= self.step_pixels
-        elif action == 4:  # move bottom edge up (crop smaller from bottom)
+        # Edge manipulation actions remapped per spec
+        if action == 0:  # Decrease bottom width -> move bottom edge up
             y_max -= self.step_pixels
-        elif action == 5:  # move bottom edge down (crop larger from bottom)
+        elif action == 1:  # Increase bottom width -> move bottom edge down
             y_max += self.step_pixels
-        elif action == 6:  # move right edge left (crop smaller from right)
+        elif action == 2:  # Decrease top width -> move top edge down
+            y_min += self.step_pixels
+        elif action == 3:  # Increase top width -> move top edge up
+            y_min -= self.step_pixels
+        elif action == 4:  # Decrease left height -> move left edge right
+            x_min += self.step_pixels
+        elif action == 5:  # Increase left height -> move left edge left
+            x_min -= self.step_pixels
+        elif action == 6:  # Decrease right height -> move right edge left
             x_max -= self.step_pixels
-        elif action == 7:  # move right edge right (crop larger from right)
+        elif action == 7:  # Increase right height -> move right edge right
             x_max += self.step_pixels
         else:
             raise ValueError(f"Invalid action: {action}")

@@ -27,39 +27,42 @@ class AestheticScorer(nn.Module):
         self.gray_mode = gray_mode
         
         # Use pre-trained backbone
-        if backbone_name.startswith('efficientnet'):
-            # For grayscale, we need to modify the first layer to accept 1 channel instead of 3
-            self.backbone = timm.create_model(backbone_name, pretrained=True, num_classes=0)
-            if gray_mode:
-                # Modify first conv layer to accept 1 channel input
-                original_conv = self.backbone.conv_stem
-                self.backbone.conv_stem = nn.Conv2d(1, original_conv.out_channels, 
-                                                   kernel_size=original_conv.kernel_size,
-                                                   stride=original_conv.stride,
-                                                   padding=original_conv.padding,
-                                                   bias=original_conv.bias is not None)
-                # Initialize with average of RGB weights
-                with torch.no_grad():
-                    self.backbone.conv_stem.weight.data = original_conv.weight.data.mean(dim=1, keepdim=True)
-            feature_dim = self.backbone.num_features
-        elif backbone_name.startswith('resnet'):
-            self.backbone = models.__dict__[backbone_name](pretrained=True)
-            if gray_mode:
-                # Modify first conv layer to accept 1 channel input
-                original_conv = self.backbone.conv1
-                self.backbone.conv1 = nn.Conv2d(1, original_conv.out_channels, 
-                                               kernel_size=original_conv.kernel_size,
-                                               stride=original_conv.stride,
-                                               padding=original_conv.padding,
-                                               bias=original_conv.bias is not None)
-                # Initialize with average of RGB weights
-                with torch.no_grad():
-                    self.backbone.conv1.weight.data = original_conv.weight.data.mean(dim=1, keepdim=True)
-            self.backbone = nn.Sequential(*list(self.backbone.children())[:-1])  # Remove final FC
-            feature_dim = 2048 if '50' in backbone_name else 512
-        else:
-            raise ValueError(f"Unsupported backbone: {backbone_name}")
-        
+        # if backbone_name.startswith('efficientnet'):
+        #     # For grayscale, we need to modify the first layer to accept 1 channel instead of 3
+        #     self.backbone = timm.create_model(backbone_name, pretrained=True, num_classes=0)
+        #     if gray_mode:
+        #         # Modify first conv layer to accept 1 channel input
+        #         original_conv = self.backbone.conv_stem
+        #         self.backbone.conv_stem = nn.Conv2d(1, original_conv.out_channels, 
+        #                                            kernel_size=original_conv.kernel_size,
+        #                                            stride=original_conv.stride,
+        #                                            padding=original_conv.padding,
+        #                                            bias=original_conv.bias is not None)
+        #         # Initialize with average of RGB weights
+        #         with torch.no_grad():
+        #             self.backbone.conv_stem.weight.data = original_conv.weight.data.mean(dim=1, keepdim=True)
+        #     feature_dim = self.backbone.num_features
+        # elif backbone_name.startswith('resnet'):
+        #     self.backbone = models.__dict__[backbone_name](pretrained=True)
+        #     if gray_mode:
+        #         # Modify first conv layer to accept 1 channel input
+        #         original_conv = self.backbone.conv1
+        #         self.backbone.conv1 = nn.Conv2d(1, original_conv.out_channels, 
+        #                                        kernel_size=original_conv.kernel_size,
+        #                                        stride=original_conv.stride,
+        #                                        padding=original_conv.padding,
+        #                                        bias=original_conv.bias is not None)
+        #         # Initialize with average of RGB weights
+        #         with torch.no_grad():
+        #             self.backbone.conv1.weight.data = original_conv.weight.data.mean(dim=1, keepdim=True)
+        #     self.backbone = nn.Sequential(*list(self.backbone.children())[:-1])  # Remove final FC
+        #     feature_dim = 2048 if '50' in backbone_name else 512
+        # else:
+        #     raise ValueError(f"Unsupported backbone: {backbone_name}")
+
+        self.backbone = timm.create_model(backbone_name, pretrained=True, num_classes=0, in_chans=1 if gray_mode else 3)
+        feature_dim = self.backbone.num_features
+
         # Freeze backbone initially
         for param in self.backbone.parameters():
             param.requires_grad = False

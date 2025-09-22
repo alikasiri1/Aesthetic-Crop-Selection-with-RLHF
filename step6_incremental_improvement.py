@@ -404,52 +404,138 @@ class IncrementalImprovementPipeline:
                 self.aesthetic_scorer = aesthetic_scorer
                 self.init_crop_hw = init_crop_hw
                 self.gray_mode = gray_mode
+                self._baseline_crops = None
+                self._init_baseline_crops()
+            
+            def _init_baseline_crops(self):
+                """Initialize baseline crops for human scoring comparison"""
+                if self.human_reward_model is None:
+                    return
+                
+                h, w = self.core_env.image_bgr.shape[:2]
+                crop_size = 224
+                
+                # Create multiple baseline crops for more robust comparison
+                self._baseline_crops = []
+                
+                # Center crop
+                center_x, center_y = w // 2, h // 2
+                x1 = max(0, center_x - crop_size // 2)
+                y1 = max(0, center_y - crop_size // 2)
+                x2 = min(w, x1 + crop_size)
+                y2 = min(h, y1 + crop_size)
+                center_crop = self.core_env.image_bgr[y1:y2, x1:x2]
+                self._baseline_crops.append(center_crop)
+                
+                # Corner crops
+                corners = [(0, 0), (w-crop_size, 0), (0, h-crop_size), (w-crop_size, h-crop_size)]
+                for cx, cy in corners:
+                    if cx >= 0 and cy >= 0 and cx + crop_size <= w and cy + crop_size <= h:
+                        corner_crop = self.core_env.image_bgr[cy:cy+crop_size, cx:cx+crop_size]
+                        self._baseline_crops.append(corner_crop)
+                
+                # Random crops
+                for _ in range(3):
+                    rx = np.random.randint(0, max(1, w - crop_size))
+                    ry = np.random.randint(0, max(1, h - crop_size))
+                    random_crop = self.core_env.image_bgr[ry:ry+crop_size, rx:rx+crop_size]
+                    self._baseline_crops.append(random_crop)
+                
+                print(f"Initialized {len(self._baseline_crops)} baseline crops for human scoring")
+            
+            def _get_human_score(self, crop_tensor):
+                """Get human score by comparing with multiple baseline crops"""
+                if self.human_reward_model is None or self._baseline_crops is None:
+                    return 0.5
+                
+                scores = []
+                for baseline_crop in self._baseline_crops:
+                    # Preprocess baseline crop
+                    baseline_crop = cv2.resize(baseline_crop, (224, 224))
+                    
+                    if self.gray_mode:
+                        baseline_crop = cv2.cvtColor(baseline_crop, cv2.COLOR_BGR2GRAY)
+                        baseline_tensor = torch.from_numpy(baseline_crop).unsqueeze(0).float() / 255.0
+                        baseline_tensor = (baseline_tensor - 0.5) / 0.5
+                    else:
+                        baseline_crop = cv2.cvtColor(baseline_crop, cv2.COLOR_BGR2RGB)
+                        baseline_tensor = torch.from_numpy(baseline_crop).permute(2, 0, 1).float() / 255.0
+                        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+                        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+                        baseline_tensor = (baseline_tensor - mean) / std
+                    
+                    baseline_tensor = baseline_tensor.unsqueeze(0)
+                    
+                    # Get preference score
+                    with torch.no_grad():
+                        preference_logit = self.human_reward_model(crop_tensor, baseline_tensor)
+                        score = torch.sigmoid(preference_logit).item()
+                        scores.append(score)
+                
+                # Return average score across all baselines
+                return np.mean(scores)
             def step(self, action):
                 obs, reward, terminated, truncated, info = self.core_env.step(int(action))
-                
-                # Get aesthetic score
-                aesthetic_score = self.core_env.get_current_score()
-                
-                # Get human preference score (if available)
+
+                # فقط human score
                 if self.human_reward_model is not None:
                     x_min, y_min, x_max, y_max = info['crop_box']
                     crop = self.core_env.image_bgr[y_min:y_max, x_min:x_max]
                     crop = cv2.resize(crop, (224, 224))
-                    
+
                     if self.gray_mode:
-                        # Convert BGR to grayscale
                         crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                        crop_tensor = torch.from_numpy(crop).unsqueeze(0).float() / 255.0  # Add channel dimension
-                        
-                        # Normalize grayscale
+                        crop_tensor = torch.from_numpy(crop).unsqueeze(0).float() / 255.0
                         mean = torch.tensor([0.5]).view(1, 1, 1)
                         std = torch.tensor([0.5]).view(1, 1, 1)
                         crop_tensor = (crop_tensor - mean) / std
                     else:
-                        # Convert BGR to RGB
                         crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
                         crop_tensor = torch.from_numpy(crop).permute(2, 0, 1).float() / 255.0
-                        
-                        # Normalize RGB
                         mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
                         std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
                         crop_tensor = (crop_tensor - mean) / std
-                    
+
                     crop_tensor = crop_tensor.unsqueeze(0)
-                    
-                    # Get human preference score (compare with average crop)
-                    with torch.no_grad():
-                        # Create a dummy "average" crop for comparison
-                        avg_crop = torch.zeros_like(crop_tensor)
-                        human_score = torch.sigmoid(self.human_reward_model(crop_tensor, avg_crop)).item()
+                    human_score = self._get_human_score(crop_tensor)
                 else:
                     human_score = 0.5
+
+                # نسبت طول و عرض کراپ فعلی
+                crop_width = x_max - x_min
+                crop_height = y_max - y_min
+                aspect_ratio = crop_width / crop_height if crop_height > 0 else 1.0
+
+                # 1) پنالتی عکس‌های خیلی عریض (هرچه aspect_ratio بزرگتر از 1 منفی‌تر)
+                penalty_wide = -0.3 * min(0, aspect_ratio - 1.0)
+
+                # 2) ریوارد نزدیکی به نسبت طلایی (۱.۶۱۸)
+                golden_ratio = 1.618
+                # اختلاف از نسبت طلایی
+                aspect_ratio = max(crop_width, crop_height) / min(crop_width, crop_height)
+                diff_from_golden = abs(aspect_ratio - golden_ratio)
+                # هرچه کمتر، ریوارد بیشتر
+                reward_golden = 0.3 * (1.0 - min(diff_from_golden / golden_ratio, 1.0))
+
+                # ریوارد نهایی = human_score + penalty_wide + reward_golden
+                print(f"HumanScore={human_score:.3f}, PenaltyWide={penalty_wide:.3f}, RewardGolden={reward_golden:.3f}")
+                final_reward = human_score + penalty_wide + reward_golden
                 
-                # Combine rewards (weighted average)
-                combined_reward = 0.1 * (aesthetic_score - 1) / 9 + 0.9 * human_score
-                combined_reward -= 0.005  # Small step penalty
+                # برای جلوگیری از مقادیر عجیب
+                final_reward = float(np.clip(final_reward, 0.0, 1.5))
+
+                if hasattr(self, '_step_count'):
+                    self._step_count += 1
+                else:
+                    self._step_count = 1
+
                 
-                return obs.astype(np.float32), float(combined_reward), bool(terminated), bool(truncated), info
+                print(f"Step {self._step_count}: Human={human_score:.3f}, Aspect={aspect_ratio:.3f}, "
+                    f"PenaltyWide={penalty_wide:.3f}, RewardGolden={reward_golden:.3f}, "
+                    f"FinalReward={final_reward:.3f}")
+
+                return obs.astype(np.float32), final_reward, bool(terminated), bool(truncated), info
+
         
         # Create environment with combined reward
         env = CombinedRewardEnv(
@@ -462,16 +548,35 @@ class IncrementalImprovementPipeline:
             aesthetic_scorer=self.aesthetic_scorer,
             gray_mode=self.gray_mode
         )
-        
-        # Load bootstrap policy as starting point
-        bootstrap_path = os.path.join(self.base_dir, "bootstrap_policy.zip")
-        model = PPO.load(bootstrap_path)
-        
-        # Fine-tune with combined reward
         from stable_baselines3.common.vec_env import DummyVecEnv
         vec_env = DummyVecEnv([lambda: env])
+        # Load bootstrap policy as starting point
+        # bootstrap_path = os.path.join(self.base_dir, "bootstrap_policy.zip")
+        # model = PPO.load(bootstrap_path)
+        from actor.train_ppo import make_env, CustomCNN
+        model = PPO(
+            policy="CnnPolicy",
+            env=vec_env,
+            learning_rate=3e-4,
+            n_steps=1024,
+            batch_size=256,
+            n_epochs=4,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            vf_coef=0.5,
+            ent_coef=0.01,
+            seed=0,
+            verbose=1,
+            policy_kwargs=dict(
+                features_extractor_class=CustomCNN,
+                features_extractor_kwargs=dict(features_dim=256, gray_mode=self.gray_mode),
+            ),
+        )
         
-        model.set_env(vec_env)
+        
+        
+        # model.set_env(vec_env)
         print(f"Fine-tuning policy for {timesteps} timesteps with combined reward...")
         model.learn(total_timesteps=timesteps)
         
